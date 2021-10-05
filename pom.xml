@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.pedrocoelho</groupId>
-    <artifactId>learining_kafka</artifactId>
+    <artifactId>kafka-basics</artifactId>
     <packaging>pom</packaging>
     <version>1.0</version>
     <modules>
