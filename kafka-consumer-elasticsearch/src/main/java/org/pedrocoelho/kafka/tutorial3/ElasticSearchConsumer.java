@@ -12,6 +12,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.action.index.IndexRequest;
@@ -32,6 +34,25 @@ import java.util.Properties;
 import java.util.UUID;
 
 import static java.util.Arrays.*;
+
+/**
+ * ISSUES:
+ * <p>
+ * problem:
+ * solution: add dependency to pom.xml file
+ * <dependency>
+ * <groupId>org.apache.httpcomponents</groupId>
+ * <artifactId>httpclient</artifactId>
+ * <version>4.5.13</version>
+ * </dependency>
+ * <p>
+ * problem: [{"type":"illegal_argument_exception","reason":"Limit of total fields [1000] has been exceeded"}]
+ * solution: request on ElasticSearch sever
+ * PUT test_index/_settings
+ * {
+ * "index.mapping.total_fields.limit": 1500. --> changed it to what is suitable for your index.
+ * }
+ */
 
 public class ElasticSearchConsumer {
     static RestHighLevelClient createClient() {
@@ -67,9 +88,11 @@ public class ElasticSearchConsumer {
         properties.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"); //disable autocommit of offsets
+        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100");
 
 
-        KafkaConsumer consumer = new KafkaConsumer<String,String>(properties);
+        KafkaConsumer consumer = new KafkaConsumer<String, String>(properties);
         consumer.subscribe(Arrays.asList(topic));
         return consumer;
     }
@@ -82,11 +105,16 @@ public class ElasticSearchConsumer {
         // Kafka consume
         KafkaConsumer<String, String> consumer = createConsumer("twitter_tweets");
 
-        while(true) {
+        while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+            int recordCount = records.count();
 
-            for(ConsumerRecord<String, String> record : records) {
-                logger.info("Key: " + record.key() + "\nValue: " + record.value() + "\nPartition: " + record.partition()+ "\nOffset: " + record.offset());
+            logger.info("Received " + records.count() + " records");
+
+            BulkRequest bulkRequest = new BulkRequest();
+
+            for (ConsumerRecord<String, String> record : records) {
+//                logger.info("Key: " + record.key() + "\nValue: " + record.value() + "\nPartition: " + record.partition()+ "\nOffset: " + record.offset());
 
                 // insert data into ElasticSearch
                 /** IMPORTANTE: Add the index first on the elasticsearch:
@@ -97,14 +125,23 @@ public class ElasticSearchConsumer {
                  *  - Twitter feed specific id = extractIdFromTweet(record.value())
                  *  - Java generated id = UUID.randomUUID().toString()
                  */
-                IndexRequest indexRequest = new IndexRequest("twitter", "tweets")
-                      .id(extractIdFromTweet(record.value())) // this will make our consumer idempotent
-                      .source(record.value(), XContentType.JSON);
+                try {
+                    String id = extractIdFromTweet(record.value());
+                    IndexRequest indexRequest = new IndexRequest("twitter", "tweets")
+                          .id(id) // this will make our consumer idempotent
+                          .source(record.value(), XContentType.JSON);
 
-                IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
-                // client.indexAsync(indexRequest, RequestOptions.DEFAULT, listener);
+                    bulkRequest.add(indexRequest); // add each request to the bulk
+                } catch (NullPointerException e) {
+                    logger.warn("Skipping bad data: " + record.value());
+                }
+            }
 
-                logger.info(indexResponse.getId());
+            if (recordCount > 0) {
+                BulkResponse bulkResponse = client.bulk(bulkRequest, RequestOptions.DEFAULT);
+                logger.info("Committing offsets...");
+                consumer.commitSync();
+                logger.info("Offsets have been committed");
 
                 try {
                     Thread.sleep(1000);
@@ -118,6 +155,7 @@ public class ElasticSearchConsumer {
     }
 
     private static JsonParser jsonParser = new JsonParser();
+
     private static String extractIdFromTweet(String value) {
         // using gson library
         return jsonParser.parse(value).getAsJsonObject().get("id_str").getAsString();
